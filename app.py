@@ -1,4 +1,7 @@
 """
+
+TEST COMMIT — проверка связки git + GitHub, дата 21.09.2026
+
 app.py — главный файл. Streamlit UI и оркестрация пайплайна.
 Вся логика разнесена по модулям: config, colors_db, canvas_math, crop_geometry,
 pixelization, frame_layout, rendering, pricing, ui_widgets.
