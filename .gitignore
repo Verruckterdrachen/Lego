@@ -1,0 +1,9 @@
+venv/
+dist/
+build/
+*.spec
+__pycache__/
+*.pyc
+lego_colors.db
+.streamlit/
+*.egg-info/
