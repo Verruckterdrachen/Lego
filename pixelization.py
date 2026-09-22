@@ -393,7 +393,35 @@ def quantize_by_superpixel_map(small_img, palette_df, n_colors_requested, segmen
     return out_ids
 
 
-def dither_bayer(small_img, palette_df, matrix_key="bayer4", segment_map=None):
+def _palette_avg_nearest_gap(palette_lab):
+    """Средняя deltaE2000-дистанция от каждого цвета палитры до его
+    ближайшего соседа. Это настоящий «шаг» между доступными тонами —
+    чем он больше (мало цветов), тем сильнее нужен дизеринг, чтобы
+    смоделировать промежуточные оттенки; чем меньше (много цветов),
+    тем слабее сдвиг, иначе будет шум на и без того плотной палитре."""
+    n = len(palette_lab)
+    if n < 2:
+        return 20.0
+    dists = deltaE_ciede2000(palette_lab[:, None, :], palette_lab[None, :, :])
+    np.fill_diagonal(dists, np.inf)
+    nearest_gaps = dists.min(axis=1)
+    return float(np.mean(nearest_gaps))
+
+
+def dither_bayer(small_img, palette_df, matrix_key="bayer4", segment_map=None, step_multiplier=1.8):
+    """Ordered/Bayer dithering со сдвигом только по L-каналу LAB (яркость),
+    не по цветовому тону (a/b) — паттерн не создаёт цветных пятен, только
+    мягкую рябь светлоты, похожую на растровую печать.
+
+    step_multiplier калибрует силу дизеринга относительно РеаЛьНОго среднего
+    зазора между соседними цветами палитры (_palette_avg_nearest_gap), а не
+    произвольной формулы от количества цветов — при малом числе цветов зазор
+    между ними больше, и тот же multiplier даёт пропорционально более сильный
+    (заметный) паттерн, компенсируя редкую палитру. Значение подбирается
+    вручную через UI-слайдер: типичный рабочий диапазон 0.3-4.0, где
+    сетка Bayer становится видимой начиная примерно с 1.0-1.5 и определённо
+    исчезает ниже ~0.5 (сдвиг не пересекает порог nearest-color).
+    """
     img_arr = np.array(small_img.convert("RGB")).astype(float)
     h, w, _ = img_arr.shape
     matrix = _BAYER_MATRICES[matrix_key]
@@ -401,10 +429,14 @@ def dither_bayer(small_img, palette_df, matrix_key="bayer4", segment_map=None):
     tiled = np.tile(matrix, (h // mh + 1, w // mw + 1))[:h, :w]
     palette_lab = palette_df[["L", "a", "b_lab"]].values
     palette_color_ids = palette_df["color_id"].values
-    step = 255.0 / max(1, len(palette_df) ** (1 / 3))
-    perturbed = np.clip(img_arr + tiled[:, :, None] * step, 0, 255)
-    lab_grid = rgb2lab(perturbed / 255.0).reshape(-1, 3)
-    ids_flat, _ = _nearest_ids_for_pixels(lab_grid, palette_lab, palette_color_ids)
+
+    lab_grid = rgb2lab(img_arr / 255.0).reshape(h, w, 3)
+    avg_gap = _palette_avg_nearest_gap(palette_lab)
+    l_step = avg_gap * step_multiplier
+    lab_grid[:, :, 0] = np.clip(lab_grid[:, :, 0] + tiled * l_step, 0, 100)
+
+    lab_flat = lab_grid.reshape(-1, 3)
+    ids_flat, _ = _nearest_ids_for_pixels(lab_flat, palette_lab, palette_color_ids)
     return ids_flat.reshape(h, w).astype(np.int32)
 
 
@@ -477,7 +509,7 @@ def dither_floyd_steinberg(small_img, palette_df, segment_map=None, strength=1.0
 
 
 def dither_to_lego_palette(small_img, palette_df, segment_map=None, quantize_mode="nearest_potts",
-                            n_colors_requested=None):
+                            n_colors_requested=None, bayer_step_multiplier=1.8):
     if quantize_mode == "superpixel":
         n = n_colors_requested if n_colors_requested is not None else len(palette_df)
         return quantize_by_superpixel_map(small_img, palette_df, n, segment_map=segment_map)
@@ -491,7 +523,8 @@ def dither_to_lego_palette(small_img, palette_df, segment_map=None, quantize_mod
         n = n_colors_requested if n_colors_requested is not None else len(palette_df)
         return quantize_by_cluster_map(small_img, palette_df, n, segment_map=segment_map)
     if quantize_mode in ("bayer4", "bayer8"):
-        return dither_bayer(small_img, palette_df, matrix_key=quantize_mode, segment_map=segment_map)
+        return dither_bayer(small_img, palette_df, matrix_key=quantize_mode, segment_map=segment_map,
+                             step_multiplier=bayer_step_multiplier)
     if quantize_mode == "atkinson":
         return dither_atkinson(small_img, palette_df, segment_map=segment_map)
     if quantize_mode == "fs_soft":
@@ -562,7 +595,7 @@ def compute_pixel_ids_full(_img_bytes, full_span_box, full_mosaic_w, full_mosaic
                             smooth_enabled=True, quantize_mode="nearest_potts",
                             cleanup_enabled=True, cleanup_fraction=0.5,
                             extra_smooth_enabled=False, extra_smooth_radius=2,
-                            apply_sharpen=False):
+                            apply_sharpen=False, bayer_step_multiplier=1.8):
     img = Image.open(io.BytesIO(_img_bytes)).convert("RGB")
     colors_df = load_colors()
     work_img = img.crop(full_span_box) if full_span_box else img
@@ -579,7 +612,8 @@ def compute_pixel_ids_full(_img_bytes, full_span_box, full_mosaic_w, full_mosaic
         segment_map_full = compute_slic_segments(_img_bytes, full_mosaic_w, full_mosaic_h, crop_box=full_span_box)
         slic_edge_mask = _build_slic_edge_mask(segment_map_full)
     pixel_ids_full = dither_to_lego_palette(small_full, working_palette, segment_map=segment_map_full,
-                                             quantize_mode=quantize_mode, n_colors_requested=n_colors_requested)
+                                             quantize_mode=quantize_mode, n_colors_requested=n_colors_requested,
+                                             bayer_step_multiplier=bayer_step_multiplier)
     if cleanup_enabled and quantize_mode != "segment_assign":
         pixel_ids_full = majority_vote_cleanup_fast(
             pixel_ids_full, min_neighbor_fraction=cleanup_fraction, enabled=True,
