@@ -11,6 +11,14 @@ from scipy.optimize import linear_sum_assignment
 
 from config import DB_PATH, SELLER_COLORS, PRICE_PER_PIECE_RUB
 
+# deltaE2000 ниже этого порога человеческий глаз практически не отличает —
+# кластерам ближе друг к другу этого порога разрешено получать один и тот
+# же LEGO-цвет вместо принудительного развода Hungarian-алгоритмом.
+# Раньше уникальность была безусловной: близкие тона кожи внутри одного
+# плавного градиента разводились на контрастные соседние цвета —
+# это и создавало видимый шум на лице/коже вместо гладкого перехода.
+UNIQUE_COLOR_DELTA_E_THRESHOLD = 4.0
+
 
 def hex_to_rgb(h):
     h = h.lstrip("#")
@@ -73,7 +81,15 @@ def rgb_to_lab_fast(rgb):
 def assign_unique_colors(centers_lab, colors_df):
     """Hungarian algorithm (linear_sum_assignment) вместо жадного greedy.
     Минимизирует суммарное CIEDE2000 по всем кластерам одновременно —
-    при близких оттенках кожи даёт лучший набор LEGO-цветов для всей палитры."""
+    при близких оттенках кожи даёт лучший набор LEGO-цветов для всей палитры.
+
+    Мягкая уникальность: кластеры, чьи центры в LAB ближе друг к другу, чем
+    UNIQUE_COLOR_DELTA_E_THRESHOLD (визуально неразличимая разница), могут
+    получить один и тот же LEGO-цвет. Раньше уникальность была обязательной
+    для всех кластеров без исключения, из-за чего плавные внутренние градиенты
+    (кожа, ткань) искусственно разводились на контрастные соседние цвета —
+    это и читалось как шум вместо мягкого перехода тона.
+    """
     palette_lab_all = colors_df[["L", "a", "b_lab"]].values
     n_clusters = len(centers_lab)
     n_available = len(palette_lab_all)
@@ -82,16 +98,31 @@ def assign_unique_colors(centers_lab, colors_df):
     for i, center_lab in enumerate(centers_lab):
         dist_matrix[i] = deltaE_ciede2000(center_lab[None, :], palette_lab_all)
 
-    if n_clusters <= n_available:
-        row_ind, col_ind = linear_sum_assignment(dist_matrix)
-        assigned_color_idx = [-1] * n_clusters
-        for r, c in zip(row_ind, col_ind):
-            assigned_color_idx[r] = c
-        for i in range(n_clusters):
-            if assigned_color_idx[i] == -1:
-                assigned_color_idx[i] = int(np.argmin(dist_matrix[i]))
-    else:
-        assigned_color_idx = [int(np.argmin(dist_matrix[i])) for i in range(n_clusters)]
+    nearest_idx = dist_matrix.argmin(axis=1)
+    nearest_dist = dist_matrix.min(axis=1)
+
+    # Кластеры внутри порога deltaE получают nearest-цвет напрямую (не идут
+    # в Hungarian-развод) — это позволяет соседним тонам одного градиента
+    # делить один LEGO-цвет вместо принудительного разнесения.
+    within_threshold = nearest_dist <= UNIQUE_COLOR_DELTA_E_THRESHOLD
+    assigned_color_idx = [-1] * n_clusters
+    for i in range(n_clusters):
+        if within_threshold[i]:
+            assigned_color_idx[i] = int(nearest_idx[i])
+
+    remaining = [i for i in range(n_clusters) if assigned_color_idx[i] == -1]
+    if remaining:
+        sub_dist = dist_matrix[remaining]
+        if len(remaining) <= n_available:
+            row_ind, col_ind = linear_sum_assignment(sub_dist)
+            for r, c in zip(row_ind, col_ind):
+                assigned_color_idx[remaining[r]] = c
+            for pos, orig_i in enumerate(remaining):
+                if assigned_color_idx[orig_i] == -1:
+                    assigned_color_idx[orig_i] = int(np.argmin(sub_dist[pos]))
+        else:
+            for pos, orig_i in enumerate(remaining):
+                assigned_color_idx[orig_i] = int(np.argmin(sub_dist[pos]))
 
     color_ids = colors_df["color_id"].values
     return [int(color_ids[idx]) for idx in assigned_color_idx]
