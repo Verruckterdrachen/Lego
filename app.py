@@ -231,11 +231,13 @@ if uploaded_file:
                                             "Уменьшает число случайных ярких/тёмных студин ещё до квантизации.")
     with col_q2:
         quantize_mode_options = list(QUANTIZE_MODE_LABELS.keys())
+        # nearest_potts теперь первый в списке и выбран по умолчанию
+        default_mode_idx = quantize_mode_options.index("nearest_potts")
         quantize_mode = st.selectbox("Способ квантизации цвета", options=quantize_mode_options,
-                                        index=quantize_mode_options.index("superpixel"),
+                                        index=default_mode_idx,
                                         format_func=lambda k: QUANTIZE_MODE_LABELS[k],
-                                        help="Суперпиксели SLIC — крупные плавные зоны тона на коже/фоне, мелкие "
-                                             "детали (глаза, брови) сохраняются отдельными сегментами.")
+                                        help="Nearest + Potts + dithering — рекомендованный режим для портретов: "
+                                             "точные контуры SLIC + ступенчатое моделирование тона кожи.")
         extra_smooth_enabled = st.checkbox("🎨 Доп. сглаживание фона (осторожно с портретами!)", value=False,
                                              help="⚠️ Gaussian blur не различает объекты — при большом радиусе может "
                                                   "смазать глаза/брови. Радиус 1-2 безопасен для портретов.")
