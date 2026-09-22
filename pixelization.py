@@ -270,20 +270,41 @@ def _assign_segments_to_palette_hungarian(seg_lab, seg_area, palette_lab, palett
         best_idx = weighted_cost.argmin(axis=1)
     return palette_color_ids[best_idx]
 
+def _build_coarse_segment_map(img_arr, studs_per_segment_side=3.0, compactness=10, sigma=1.0):
+    """SLIC прямо на пикселизованном изображении (уже в размере
+    мозаики h x w studs), с сегментами размером ~studs_per_segment_side^2
+    studs каждый. Отличается от compute_slic_segments, который считает
+    SLIC на крупном исходнике и сводит его к сетке studs через majority-vote -
+    при типичных настройках (SLIC_SEGMENTS_PER_STUD~1) там получается
+    ~1 сегмент на 1 stud, и segment_assign вырождается в почти-nearest.
+    Здесь сегменты сознательно КРУПНЕЕ studs, как flood-fill области
+    в LEGO Art Mosaic Generator (Gassen)."""
+    h, w, _ = img_arr.shape
+    n_target = max(8, int((h * w) / (studs_per_segment_side ** 2)))
+    img_float = np.clip(img_arr, 0, 255) / 255.0
+    segments = slic(img_float, n_segments=n_target, compactness=compactness,
+                     sigma=sigma, start_label=0)
+    return segments
+
 def quantize_by_segment_assign(small_img, palette_df, segment_map=None,
-                                dither_seams=True, seam_strength=0.5):
+                                dither_seams=True, seam_strength=0.5,
+                                studs_per_segment_side=3.0):
+    """segment_map, если передан извне, игнорируется для
+    бостроения сегментов - вместо этого строится собственная,
+    более грубая сегментация."""
     img_arr = np.array(small_img.convert("RGB")).astype(float)
     h, w, _ = img_arr.shape
-    if segment_map is None or segment_map.shape != (h, w):
-        return quantize_nearest(small_img, palette_df, segment_map=None)
+    coarse_segment_map = _build_coarse_segment_map(
+        img_arr, studs_per_segment_side=studs_per_segment_side
+    )
     palette_lab = palette_df[["L", "a", "b_lab"]].values
     palette_rgb = palette_df[["r", "g", "b"]].values.astype(float)
     palette_color_ids = palette_df["color_id"].values
-    seg_ids, seg_lab, seg_area = _segment_colors_lab_median(img_arr, segment_map)
+    seg_ids, seg_lab, seg_area = _segment_colors_lab_median(img_arr, coarse_segment_map)
     seg_color_ids = _assign_segments_to_palette_hungarian(seg_lab, seg_area, palette_lab, palette_color_ids)
     id_lookup = np.zeros(int(seg_ids.max()) + 1, dtype=palette_color_ids.dtype)
     id_lookup[seg_ids] = seg_color_ids
-    pixel_ids = id_lookup[segment_map]
+    pixel_ids = id_lookup[coarse_segment_map]
     if not dither_seams:
         return pixel_ids.astype(np.int32)
     color_to_rgb = {int(cid): palette_rgb[i] for i, cid in enumerate(palette_color_ids)}
