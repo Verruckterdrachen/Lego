@@ -130,7 +130,38 @@ FRAME_SEAM_WIDTH_FACTOR = 10
 MATTING_SEAM_WIDTH_FACTOR = 16
 
 DARK_THEME_CSS = """
-
+<style>
+.stApp { background-color: #0e1117; color: #e6e6e6; }
+section[data-testid="stSidebar"] { background-color: #14161f; }
+h1, h2, h3, h4, h5, h6, p, label, span, div { color: #e6e6e6 !important; }
+table { background-color: #1a1c24 !important; color: #e6e6e6 !important; }
+thead tr th { background-color: #262a35 !important; color: #ffffff !important; }
+tbody tr td { background-color: #1a1c24 !important; color: #e6e6e6 !important; border-color: #333 !important; }
+.stButton button { background-color: #262a35; color: #e6e6e6; border: 1px solid #444;
+    padding: 0px 0px; min-height: 32px; width: 100%; }
+.stButton button:hover { background-color: #33384a; border: 1px solid #0055BF; }
+.metric-card-sm { background-color: #1a1c24; border: 1px solid #333844; border-radius: 8px;
+    padding: 6px 12px; margin-bottom: 6px; }
+.metric-label-sm { font-size: 12px; color: #9aa0ac !important; margin-bottom: 1px; }
+.metric-value-sm { font-size: 20px; font-weight: 700; color: #ffffff !important; line-height: 1.1; }
+.metric-value-sm.accent { color: #5AC4DA !important; }
+.metric-value-sm.money { color: #7CD992 !important; }
+.metric-value-sm.price { color: #F2CD37 !important; font-size: 24px; }
+.metric-value-sm.warn { color: #FF6B6B !important; }
+.metric-value-sm.neutral { color: #9aa0ac !important; font-size: 17px; }
+div.block-container { padding-top: 1.4rem; padding-bottom: 1.4rem; }
+div[data-testid="stVerticalBlock"] { gap: 0.35rem; }
+div[data-testid="element-container"] { margin-bottom: 0 !important; }
+h3 { margin-top: 0.6rem !important; margin-bottom: 0.35rem !important; }
+hr { margin: 0.5rem 0 !important; }
+div[data-testid="stCaptionContainer"] { margin-top: 0 !important; margin-bottom: 0.3rem !important; }
+div[data-testid="stSlider"] { padding-top: 0.1rem; padding-bottom: 0.1rem; }
+div[data-testid="stRadio"] { padding-top: 0.1rem; padding-bottom: 0.1rem; }
+div[data-testid="stCheckbox"] { padding-top: 0.05rem; padding-bottom: 0.05rem; }
+div[data-testid="stImage"] { margin-bottom: 0.3rem; }
+div[data-testid="stHorizontalBlock"] { gap: 0.6rem; align-items: flex-start; }
+label[data-testid="stWidgetLabel"] { margin-bottom: 0.1rem; padding-bottom: 0; }
+</style>
 """
 
 SELLER_COLORS = [
