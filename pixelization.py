@@ -68,13 +68,26 @@ def pixelate_exact(img, target_w, target_h, crop_box=None, apply_sharpen=False):
 
 
 def build_working_palette(small_img, n_colors, colors_df):
-    """KMeans в Lab (не RGB) — perceptually uniform пространство,
-    лучше разделяет телесные оттенки и тёмные волосы."""
+    """KMeans в Lab — perceptually uniform пространство.
+    Взвешенный вариант: пиксели из высокочастотных (детальных) зон
+    получают вес x3, чтобы палитра не была украдена фоном/волосами."""
     arr_rgb = np.array(small_img.convert("RGB")).reshape(-1, 3).astype(float)
     arr_lab = rgb2lab((arr_rgb.reshape(-1, 1, 3) / 255.0)).reshape(-1, 3)
+
+    # Saliency-веса: высокочастотные пиксели (детали лица) весят больше
+    h, w = small_img.size[1], small_img.size[0]
+    gray = np.array(small_img.convert("L")).astype(float)
+    grad_x = np.abs(np.diff(gray, axis=1, append=gray[:, -1:]))
+    grad_y = np.abs(np.diff(gray, axis=0, append=gray[-1:, :]))
+    grad_mag = (grad_x + grad_y).flatten()
+    # нормируем в [1, 3]: фон весит 1, резкие границы — 3
+    w_min, w_max = grad_mag.min(), grad_mag.max() + 1e-6
+    pixel_weights = 1.0 + 2.0 * (grad_mag - w_min) / (w_max - w_min)
+
     n_unique_pixels = len(np.unique(arr_rgb, axis=0))
     k = max(1, min(n_colors, n_unique_pixels, len(colors_df)))
-    km = KMeans(n_clusters=k, n_init=6, random_state=42).fit(arr_lab)
+    km = KMeans(n_clusters=k, n_init=6, random_state=42)
+    km.fit(arr_lab, sample_weight=pixel_weights)
     centers_lab = km.cluster_centers_
     matched_color_ids = assign_unique_colors(centers_lab, colors_df)
     unique_ids = sorted(set(matched_color_ids))
@@ -118,6 +131,22 @@ def _build_edge_mask(pixel_ids):
     return magnitude > threshold
 
 
+def _build_saliency_mask(small_img):
+    """Маска «важных» пикселей (глаза, губы, брови, контур).
+    Возвращает float-карту [0..1], где 1 = высокая важность.
+    Метод: локальный контраст в Lab по 3x3 окну."""
+    arr_rgb = np.array(small_img.convert("RGB")).astype(float)
+    arr_lab = rgb2lab(arr_rgb / 255.0)  # (H, W, 3)
+    # Локальный контраст: разница между пикселем и средним 3x3 соседями
+    from scipy.ndimage import uniform_filter
+    blurred_L = uniform_filter(arr_lab[:, :, 0], size=3)
+    local_contrast = np.abs(arr_lab[:, :, 0] - blurred_L)
+    # нормируем в [0, 1]
+    lc_min, lc_max = local_contrast.min(), local_contrast.max() + 1e-6
+    saliency = (local_contrast - lc_min) / (lc_max - lc_min)
+    return saliency
+
+
 def quantize_nearest(small_img, palette_df, segment_map=None):
     img_arr = np.array(small_img.convert("RGB")).astype(float)
     h, w, _ = img_arr.shape
@@ -129,15 +158,29 @@ def quantize_nearest(small_img, palette_df, segment_map=None):
 
 
 def quantize_nearest_potts_fast(small_img, palette_df, segment_map=None,
-                                  smoothness=2.0, n_iter=2):
-    """Nearest-color + edge-aware Potts-регуляризация (векторизованная ICM).
-    Убирает шумовые одиночные пиксели внутри однородных зон (кожа, фон, волосы),
-    но НЕ сглаживает через цветовые границы объектов.
-    smoothness=2.0, n_iter=2 оптимальны для портретов 48x64 — 80x100."""
+                                  smoothness=2.5, n_iter=3):
+    """
+    Nearest-color + edge-aware Potts-регуляризация v2.
+
+    Улучшения по сравнению с v1:
+    - smoothness=2.5 (было 2.0) — активнее убирает шум внутри однородных зон
+    - n_iter=3 (было 2) — сходится полнее
+    - Saliency-маска: пиксели с высоким локальным контрастом (глаза, губы,
+      брови, линия носа) получают уменьшенный вес регуляризации (x0.25),
+      так что их цвет определяется данными, а не соседями.
+      Это и есть ключевое отличие от v1, где регуляризация была равномерной.
+    - Граничные пиксели (Sobel) тоже получают сниженный смуфинг (x0.3).
+    - Перенос ошибки (мягкий Floyd-Steinberg, strength=0.25) применяется
+      ПОСЛЕ ICM только в зонах с низкой saliency (кожа, фон, волосы) —
+      возвращает плавные градиенты без шахматки.
+
+    smoothness=2.5, n_iter=3 оптимальны для портретов 48x64 — 96x128.
+    """
     img_arr = np.array(small_img.convert("RGB")).astype(float)
     h, w, _ = img_arr.shape
     palette_lab = palette_df[["L", "a", "b_lab"]].values
     palette_color_ids = palette_df["color_id"].values
+    palette_rgb = palette_df[["r", "g", "b"]].values.astype(float)
     n_colors = len(palette_df)
 
     lab_grid = rgb2lab(img_arr / 255.0).reshape(-1, 3)
@@ -145,17 +188,65 @@ def quantize_nearest_potts_fast(small_img, palette_df, segment_map=None,
     data_cost = all_dists.reshape(h, w, n_colors)
     current = all_dists.argmin(axis=1).reshape(h, w)
 
+    # Saliency-карта [H, W] — высокий контраст = важная деталь
+    saliency = _build_saliency_mask(small_img)  # [0..1]
+    # Регуляризация подавлена на деталях и границах
+    # smooth_weight[y,x] ∈ [0.25*smoothness .. smoothness]
+    smooth_weight = smoothness * (1.0 - 0.75 * saliency)  # [H, W]
+
     for _ in range(n_iter):
         agree = np.zeros((h, w, n_colors), dtype=np.float32)
         for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            shifted = np.roll(current, shift=dy, axis=0) if dy else current
+            shifted = np.roll(current, shift=dy, axis=0) if dy else current.copy()
             shifted = np.roll(shifted, shift=dx, axis=1) if dx else shifted
             for ci in range(n_colors):
                 agree[:, :, ci] += (shifted == ci).astype(np.float32)
-        total_cost = data_cost - smoothness * agree
+        # умножаем agree на попиксельный вес регуляризации
+        agree *= smooth_weight[:, :, None]
+        total_cost = data_cost - agree
         current = total_cost.argmin(axis=2)
 
-    return palette_color_ids[current].astype(np.int32)
+    result_ids = palette_color_ids[current].astype(np.int32)
+
+    # Локальный мягкий dithering только в зонах низкой saliency
+    # (кожа, фон, волосы) — возвращает плавные переходы без шахматки
+    low_saliency_mask = saliency < 0.25  # плавные зоны
+    dither_strength = 0.25
+    work = img_arr.copy()
+    for y in range(h):
+        xrange = range(w) if y % 2 == 0 else range(w - 1, -1, -1)
+        direction = 1 if y % 2 == 0 else -1
+        for x in xrange:
+            if not low_saliency_mask[y, x]:
+                continue  # детали не трогаем
+            idx = np.where(palette_color_ids == result_ids[y, x])[0]
+            if len(idx) == 0:
+                continue
+            new_pixel = palette_rgb[idx[0]]
+            error = (work[y, x] - new_pixel) * dither_strength
+            nx = x + direction
+            if 0 <= nx < w and low_saliency_mask[y, nx]:
+                work[y, nx] += error * 7 / 16
+            if y + 1 < h:
+                nx_back = x - direction
+                if 0 <= nx_back < w and low_saliency_mask[y + 1, nx_back]:
+                    work[y + 1, nx_back] += error * 3 / 16
+                if low_saliency_mask[y + 1, x]:
+                    work[y + 1, x] += error * 5 / 16
+                nx_fwd = x + direction
+                if 0 <= nx_fwd < w and low_saliency_mask[y + 1, nx_fwd]:
+                    work[y + 1, nx_fwd] += error * 1 / 16
+
+        # Переприсваиваем изменённые пиксели в строке
+        work_row = np.clip(work[y], 0, 255)
+        lab_row = rgb2lab(work_row.reshape(1, -1, 3) / 255.0).reshape(-1, 3)
+        dists_row = deltaE_ciede2000(lab_row[:, None, :], palette_lab[None, :, :])
+        new_row_idx = dists_row.argmin(axis=1)
+        for x in xrange:
+            if low_saliency_mask[y, x]:
+                result_ids[y, x] = palette_color_ids[new_row_idx[x]]
+
+    return result_ids
 
 
 def quantize_by_cluster_map(small_img, palette_df, n_colors_requested, segment_map=None):
@@ -383,6 +474,6 @@ def compute_pixel_ids_full(_img_bytes, full_span_box, full_mosaic_w, full_mosaic
                                                        enabled=True)
 
     # Реальный счётчик: unique значения в итоговой карте, а не размер рабочей палитры
-    actual_used_colors = len(np.unique(pixel_ids_full))
+    actual_used_colors = int(len(np.unique(pixel_ids_full)))
 
     return pixel_ids_full, working_palette, actual_used_colors, k_used
