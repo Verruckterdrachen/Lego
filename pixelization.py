@@ -1,20 +1,3 @@
-"""
-pixelization.py — три независимые стадии пикселизации, переключаемые чекбоксами:
-  A) smooth_before_pixelize / smooth_super_strong — сглаживание ДО ресайза.
-  B) dither_to_lego_palette (диспетчер) — способ назначения цвета студине:
-     superpixel (рекомендуется) / nearest / cluster / bayer4 / bayer8 /
-     atkinson / fs_soft / fs_classic.
-  C) majority_vote_cleanup_fast — финальная чистка одиночных выбросов.
-
-ВАЖНО про защиту мелких деталей (глаза/брови на портретах):
-  - smooth_before_pixelize использует sigma_spatial=8 (не выше!) — при больших
-    значениях bilateral съедает мелкие контрастные детали лица.
-  - quantize_by_superpixel_map использует n_segments_multiplier=4.0 и
-    compactness=12 — мельче сегменты, точнее следуют контуру глаз/бровей.
-  - smooth_super_strong (доп. Gaussian) ограничен радиусом 1-6 в UI и по
-    умолчанию ВыКЛГаќЖЇ — это самый агрессивный и наименее безопасный для
-    портретов способ сглаживания.
-"""
 import io
 import numpy as np
 import streamlit as st
@@ -24,6 +7,7 @@ from skimage.segmentation import slic
 from skimage.restoration import denoise_bilateral
 from sklearn.cluster import KMeans
 from scipy import ndimage
+from scipy.optimize import linear_sum_assignment
 
 from config import QUANTIZE_MODE_LABELS, BAYER_4x4, BAYER_8x8, _BAYER_MATRICES, SLIC_MAX_DIM, SLIC_COMPACTNESS, SLIC_SIGMA, SLIC_SEGMENTS_PER_STUD
 from colors_db import load_colors, rgb_to_lab_fast, assign_unique_colors
@@ -60,7 +44,13 @@ def compute_slic_segments(_img_bytes, w_studs, h_studs, crop_box=None):
                 grid_segments[ty, tx] = grid_segments[ty, tx-1] if tx > 0 else 0
                 continue
             vals, counts = np.unique(block, return_counts=True)
-            grid_segments[ty, tx] = vals[counts.argmax()]
+            majority_seg = vals[counts.argmax()]
+            majority_frac = counts.max() / block.size
+            if majority_frac < 0.65 and len(vals) > 1:
+                second_idx = np.argsort(counts)[-2]
+                grid_segments[ty, tx] = vals[second_idx] if counts[second_idx] / block.size >= 0.35 else majority_seg
+            else:
+                grid_segments[ty, tx] = majority_seg
     return grid_segments
 
 
@@ -68,7 +58,9 @@ def pre_sharpen(img, percent=150, radius=2, threshold=2):
     return img.filter(ImageFilter.UnsharpMask(radius=radius, percent=percent, threshold=threshold))
 
 
-def pixelate_exact(img, target_w, target_h, crop_box=None, apply_sharpen=True):
+def pixelate_exact(img, target_w, target_h, crop_box=None, apply_sharpen=False):
+    """apply_sharpen=False по умолчанию — UnsharpMask создаёт ореолы,
+    которые при большом числе цветов превращаются в битые одиночные пиксели."""
     work = img.crop(crop_box) if crop_box else img
     if apply_sharpen:
         work = pre_sharpen(work)
@@ -76,11 +68,14 @@ def pixelate_exact(img, target_w, target_h, crop_box=None, apply_sharpen=True):
 
 
 def build_working_palette(small_img, n_colors, colors_df):
-    arr = np.array(small_img.convert("RGB")).reshape(-1, 3).astype(float)
-    n_unique_pixels = len(np.unique(arr, axis=0))
+    """KMeans в Lab (не RGB) — perceptually uniform пространство,
+    лучше разделяет телесные оттенки и тёмные волосы."""
+    arr_rgb = np.array(small_img.convert("RGB")).reshape(-1, 3).astype(float)
+    arr_lab = rgb2lab((arr_rgb.reshape(-1, 1, 3) / 255.0)).reshape(-1, 3)
+    n_unique_pixels = len(np.unique(arr_rgb, axis=0))
     k = max(1, min(n_colors, n_unique_pixels, len(colors_df)))
-    km = KMeans(n_clusters=k, n_init=6, random_state=42).fit(arr)
-    centers_lab = rgb2lab((km.cluster_centers_.reshape(-1, 1, 3) / 255.0)).reshape(-1, 3)
+    km = KMeans(n_clusters=k, n_init=6, random_state=42).fit(arr_lab)
+    centers_lab = km.cluster_centers_
     matched_color_ids = assign_unique_colors(centers_lab, colors_df)
     unique_ids = sorted(set(matched_color_ids))
     subset = colors_df[colors_df["color_id"].isin(unique_ids)].reset_index(drop=True)
@@ -111,6 +106,18 @@ def _nearest_ids_for_pixels(lab_pixels, palette_lab, palette_color_ids):
     return palette_color_ids[idx], idx
 
 
+def _build_edge_mask(pixel_ids):
+    """Маска границ по Sobel на карте color_id.
+    True = граница — эти пиксели не трогает cleanup."""
+    from scipy.ndimage import sobel
+    arr = pixel_ids.astype(float)
+    sx = sobel(arr, axis=1)
+    sy = sobel(arr, axis=0)
+    magnitude = np.hypot(sx, sy)
+    threshold = magnitude.mean() + magnitude.std() * 0.5
+    return magnitude > threshold
+
+
 def quantize_nearest(small_img, palette_df, segment_map=None):
     img_arr = np.array(small_img.convert("RGB")).astype(float)
     h, w, _ = img_arr.shape
@@ -119,6 +126,36 @@ def quantize_nearest(small_img, palette_df, segment_map=None):
     lab_grid = rgb2lab(img_arr / 255.0).reshape(-1, 3)
     ids_flat, _ = _nearest_ids_for_pixels(lab_grid, palette_lab, palette_color_ids)
     return ids_flat.reshape(h, w).astype(np.int32)
+
+
+def quantize_nearest_potts_fast(small_img, palette_df, segment_map=None,
+                                  smoothness=2.0, n_iter=2):
+    """Nearest-color + edge-aware Potts-регуляризация (векторизованная ICM).
+    Убирает шумовые одиночные пиксели внутри однородных зон (кожа, фон, волосы),
+    но НЕ сглаживает через цветовые границы объектов.
+    smoothness=2.0, n_iter=2 оптимальны для портретов 48x64 — 80x100."""
+    img_arr = np.array(small_img.convert("RGB")).astype(float)
+    h, w, _ = img_arr.shape
+    palette_lab = palette_df[["L", "a", "b_lab"]].values
+    palette_color_ids = palette_df["color_id"].values
+    n_colors = len(palette_df)
+
+    lab_grid = rgb2lab(img_arr / 255.0).reshape(-1, 3)
+    all_dists = deltaE_ciede2000(lab_grid[:, None, :], palette_lab[None, :, :])
+    data_cost = all_dists.reshape(h, w, n_colors)
+    current = all_dists.argmin(axis=1).reshape(h, w)
+
+    for _ in range(n_iter):
+        agree = np.zeros((h, w, n_colors), dtype=np.float32)
+        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            shifted = np.roll(current, shift=dy, axis=0) if dy else current
+            shifted = np.roll(shifted, shift=dx, axis=1) if dx else shifted
+            for ci in range(n_colors):
+                agree[:, :, ci] += (shifted == ci).astype(np.float32)
+        total_cost = data_cost - smoothness * agree
+        current = total_cost.argmin(axis=2)
+
+    return palette_color_ids[current].astype(np.int32)
 
 
 def quantize_by_cluster_map(small_img, palette_df, n_colors_requested, segment_map=None):
@@ -145,9 +182,7 @@ def quantize_by_cluster_map(small_img, palette_df, n_colors_requested, segment_m
 
 def quantize_by_superpixel_map(small_img, palette_df, n_colors_requested, segment_map=None,
                                   n_segments_multiplier=4.0, compactness=12, sigma=1.0):
-    """Режим 'superpixel'. SLIC-суперпиксели + усреднение цвета. Мелкие
-    сегменты (n_segments_multiplier=4.0, compactness=12) сохраняют глаза/брови
-    отдельными сегментами вместо укрупнения всего лица в 4-6 зон."""
+    """Режим 'superpixel'. SLIC-суперпиксели + усреднение цвета."""
     img_arr = np.array(small_img.convert("RGB")).astype(float)
     h, w, _ = img_arr.shape
     palette_lab = palette_df[["L", "a", "b_lab"]].values
@@ -271,6 +306,8 @@ def dither_to_lego_palette(small_img, palette_df, segment_map=None, quantize_mod
         return quantize_by_superpixel_map(small_img, palette_df, n, segment_map=segment_map)
     if quantize_mode == "nearest":
         return quantize_nearest(small_img, palette_df, segment_map=segment_map)
+    if quantize_mode == "nearest_potts":
+        return quantize_nearest_potts_fast(small_img, palette_df, segment_map=segment_map)
     if quantize_mode == "cluster":
         n = n_colors_requested if n_colors_requested is not None else len(palette_df)
         return quantize_by_cluster_map(small_img, palette_df, n, segment_map=segment_map)
@@ -284,8 +321,13 @@ def dither_to_lego_palette(small_img, palette_df, segment_map=None, quantize_mod
 
 
 def majority_vote_cleanup_fast(pixel_ids, min_neighbor_fraction=0.5, iterations=1, enabled=True):
+    """Чистка одиночных выбросов с защитой граничных пикселей.
+    Пиксели вблизи границ (Sobel-маска) НЕ изменяются — сохраняет
+    зрачки, веки, края губ и контур лица."""
     if not enabled:
         return pixel_ids
+
+    edge_mask = _build_edge_mask(pixel_ids)
 
     def _mode_excluding_center(values):
         center = values[4]
@@ -299,7 +341,9 @@ def majority_vote_cleanup_fast(pixel_ids, min_neighbor_fraction=0.5, iterations=
 
     result = pixel_ids.copy()
     for _ in range(max(1, iterations)):
-        result = ndimage.generic_filter(result, _mode_excluding_center, size=3, mode="nearest").astype(np.int32)
+        cleaned = ndimage.generic_filter(result, _mode_excluding_center, size=3, mode="nearest").astype(np.int32)
+        cleaned[edge_mask] = result[edge_mask]
+        result = cleaned
     return result
 
 
@@ -308,12 +352,12 @@ def compute_pixel_ids_full(_img_bytes, full_span_box, full_mosaic_w, full_mosaic
                             n_colors_requested, use_slic_boundaries, colors_db_signature,
                             smooth_enabled=True, quantize_mode="superpixel",
                             cleanup_enabled=True, cleanup_fraction=0.5,
-                            extra_smooth_enabled=False, extra_smooth_radius=2):
+                            extra_smooth_enabled=False, extra_smooth_radius=2,
+                            apply_sharpen=False):
     """
-    Стадия A — умеренный bilateral (sigma_spatial=8, безопасно для глаз),
-    плюс опциональный Gaussian с ограниченным радиусом.
-    Стадия B — "superpixel" даёт крупные плавные зоны, сохраняя детали.
-    Стадия C — majority-vote постобработка.
+    apply_sharpen=False по умолчанию — UnsharpMask + Lanczos создают ореолы,
+    которые при большом числе цветов превращаются в битые одиночные пиксели.
+    Передавайте apply_sharpen=True только через явный UI-чекбокс.
     """
     img = Image.open(io.BytesIO(_img_bytes)).convert("RGB")
     colors_df = load_colors()
@@ -322,7 +366,8 @@ def compute_pixel_ids_full(_img_bytes, full_span_box, full_mosaic_w, full_mosaic
     work_img = smooth_before_pixelize(work_img, enabled=smooth_enabled)
     work_img = smooth_super_strong(work_img, radius=extra_smooth_radius, enabled=extra_smooth_enabled)
 
-    small_full = pixelate_exact(work_img, full_mosaic_w, full_mosaic_h, crop_box=None)
+    small_full = pixelate_exact(work_img, full_mosaic_w, full_mosaic_h,
+                                 crop_box=None, apply_sharpen=apply_sharpen)
     working_palette, actual_unique_colors, k_used = build_working_palette(small_full, n_colors_requested, colors_df)
 
     segment_map_full = None
@@ -337,4 +382,7 @@ def compute_pixel_ids_full(_img_bytes, full_span_box, full_mosaic_w, full_mosaic
         pixel_ids_full = majority_vote_cleanup_fast(pixel_ids_full, min_neighbor_fraction=cleanup_fraction,
                                                        enabled=True)
 
-    return pixel_ids_full, working_palette, actual_unique_colors, k_used
+    # Реальный счётчик: unique значения в итоговой карте, а не размер рабочей палитры
+    actual_used_colors = len(np.unique(pixel_ids_full))
+
+    return pixel_ids_full, working_palette, actual_used_colors, k_used

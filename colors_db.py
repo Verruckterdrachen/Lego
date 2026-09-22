@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from skimage.color import rgb2lab, deltaE_ciede2000
+from scipy.optimize import linear_sum_assignment
 
 from config import DB_PATH, SELLER_COLORS, PRICE_PER_PIECE_RUB
 
@@ -70,26 +71,27 @@ def rgb_to_lab_fast(rgb):
 
 
 def assign_unique_colors(centers_lab, colors_df):
+    """Hungarian algorithm (linear_sum_assignment) вместо жадного greedy.
+    Минимизирует суммарное CIEDE2000 по всем кластерам одновременно —
+    при близких оттенках кожи даёт лучший набор LEGO-цветов для всей палитры."""
     palette_lab_all = colors_df[["L", "a", "b_lab"]].values
     n_clusters = len(centers_lab)
     n_available = len(palette_lab_all)
+
     dist_matrix = np.zeros((n_clusters, n_available))
     for i, center_lab in enumerate(centers_lab):
         dist_matrix[i] = deltaE_ciede2000(center_lab[None, :], palette_lab_all)
 
-    assigned_color_idx = [-1] * n_clusters
-    used = set()
-    flat_order = np.dstack(np.unravel_index(np.argsort(dist_matrix, axis=None), dist_matrix.shape))[0]
-    for cluster_i, color_j in flat_order:
-        cluster_i, color_j = int(cluster_i), int(color_j)
-        if assigned_color_idx[cluster_i] == -1 and color_j not in used:
-            assigned_color_idx[cluster_i] = color_j
-            used.add(color_j)
-        if all(a != -1 for a in assigned_color_idx):
-            break
-    for i in range(n_clusters):
-        if assigned_color_idx[i] == -1:
-            assigned_color_idx[i] = int(np.argmin(dist_matrix[i]))
+    if n_clusters <= n_available:
+        row_ind, col_ind = linear_sum_assignment(dist_matrix)
+        assigned_color_idx = [-1] * n_clusters
+        for r, c in zip(row_ind, col_ind):
+            assigned_color_idx[r] = c
+        for i in range(n_clusters):
+            if assigned_color_idx[i] == -1:
+                assigned_color_idx[i] = int(np.argmin(dist_matrix[i]))
+    else:
+        assigned_color_idx = [int(np.argmin(dist_matrix[i])) for i in range(n_clusters)]
 
     color_ids = colors_df["color_id"].values
     return [int(color_ids[idx]) for idx in assigned_color_idx]

@@ -211,7 +211,8 @@ SELLER_COLORS = [
 
 
 QUANTIZE_MODE_LABELS = {
-    "superpixel": "Суперпиксели SLIC + усреднение (плавные зоны, рекомендуется)",
+    "superpixel": "Суперпиксели SLIC + усреднение (плавные зоны)",
+    "nearest_potts": "Nearest + Potts-регуляризация (портреты, рекомендуется)",
     "nearest": "Nearest-color (точный, есть выбросы)",
     "cluster": "Кластерная карта K-Means (зонально, хендмейд)",
     "bayer4": "Ordered/Bayer 4x4 (регулярный узор)",
