@@ -16,12 +16,14 @@ from config import (
 )
 from colors_db import load_colors, rgb_to_lab_fast, assign_unique_colors
 
+
 def resize_for_slic(img, max_dim=SLIC_MAX_DIM):
     w, h = img.size
     if max(w, h) <= max_dim:
         return img
     scale = max_dim / max(w, h)
     return img.resize((round(w * scale), round(h * scale)), Image.Resampling.LANCZOS)
+
 
 @st.cache_data(show_spinner=False)
 def compute_slic_segments(_img_bytes, w_studs, h_studs, crop_box=None):
@@ -47,8 +49,10 @@ def compute_slic_segments(_img_bytes, w_studs, h_studs, crop_box=None):
             grid_segments[ty, tx] = vals[counts.argmax()]
     return grid_segments
 
+
 def pre_sharpen(img, percent=150, radius=2, threshold=2):
     return img.filter(ImageFilter.UnsharpMask(radius=radius, percent=percent, threshold=threshold))
+
 
 def pixelate_exact(img, target_w, target_h, crop_box=None, apply_sharpen=False):
     work = img.crop(crop_box) if crop_box else img
@@ -56,10 +60,11 @@ def pixelate_exact(img, target_w, target_h, crop_box=None, apply_sharpen=False):
         work = pre_sharpen(work)
     return work.resize((target_w, target_h), Image.Resampling.LANCZOS)
 
+
 def _rgb_to_oklab(rgb_uint8):
     lin = np.where(rgb_uint8 / 255.0 <= 0.04045,
-                   rgb_uint8 / 255.0 / 12.92,
-                   ((rgb_uint8 / 255.0 + 0.055) / 1.055) ** 2.4)
+                    rgb_uint8 / 255.0 / 12.92,
+                    ((rgb_uint8 / 255.0 + 0.055) / 1.055) ** 2.4)
     M1 = np.array([[0.4122214708, 0.5363325363, 0.0514459929],
                    [0.2119034982, 0.6806995451, 0.1073969566],
                    [0.0883024619, 0.2817188376, 0.6299787005]])
@@ -69,6 +74,7 @@ def _rgb_to_oklab(rgb_uint8):
                    [1.9779984951, -2.4285922050, 0.4505937099],
                    [0.0259040371, 0.7827717662, -0.8086757660]])
     return lms_cb @ M2.T
+
 
 def _oklab_centers_to_lab(centers_oklab):
     M2_inv = np.linalg.inv(np.array([
@@ -85,10 +91,11 @@ def _oklab_centers_to_lab(centers_oklab):
     ]))
     lin = np.clip(lms @ M1_inv.T, 0, 1)
     srgb = np.where(lin <= 0.0031308,
-                    lin * 12.92,
-                    1.055 * lin ** (1.0 / 2.4) - 0.055)
+                     lin * 12.92,
+                     1.055 * lin ** (1.0 / 2.4) - 0.055)
     srgb_uint8 = np.clip(srgb * 255, 0, 255).astype(np.uint8)
     return rgb2lab(srgb_uint8.reshape(-1, 1, 3) / 255.0).reshape(-1, 3)
+
 
 def build_working_palette(small_img, n_colors, colors_df):
     arr_rgb = np.array(small_img.convert("RGB")).reshape(-1, 3).astype(float)
@@ -101,6 +108,7 @@ def build_working_palette(small_img, n_colors, colors_df):
     unique_ids = sorted(set(matched_color_ids))
     subset = colors_df[colors_df["color_id"].isin(unique_ids)].reset_index(drop=True)
     return subset, len(unique_ids), k
+
 
 def build_working_palette_weighted(small_img, n_colors, colors_df, saliency_map=None):
     arr_rgb = np.array(small_img.convert("RGB")).reshape(-1, 3).astype(np.float64)
@@ -120,6 +128,7 @@ def build_working_palette_weighted(small_img, n_colors, colors_df, saliency_map=
     subset = colors_df[colors_df["color_id"].isin(unique_ids)].reset_index(drop=True)
     return subset, len(unique_ids), k
 
+
 def compute_saliency_map(small_img):
     from scipy.ndimage import sobel, gaussian_filter
     arr = np.array(small_img.convert("RGB")).astype(np.float32) / 255.0
@@ -138,6 +147,7 @@ def compute_saliency_map(small_img):
     sal = sal / (sal.max() + 1e-8)
     return sal.astype(np.float32)
 
+
 def smooth_before_pixelize(img, sigma_color=0.08, sigma_spatial=8, enabled=True):
     if not enabled:
         return img
@@ -146,15 +156,18 @@ def smooth_before_pixelize(img, sigma_color=0.08, sigma_spatial=8, enabled=True)
     smoothed = np.clip(smoothed * 255.0, 0, 255).astype(np.uint8)
     return Image.fromarray(smoothed, mode="RGB")
 
+
 def smooth_super_strong(img, radius=2, enabled=True):
     if not enabled or radius <= 0:
         return img
     return img.filter(ImageFilter.GaussianBlur(radius=radius))
 
+
 def _nearest_ids_for_pixels(lab_pixels, palette_lab, palette_color_ids):
     diffs = deltaE_ciede2000(lab_pixels[:, None, :], palette_lab[None, :, :])
     idx = diffs.argmin(axis=1)
     return palette_color_ids[idx], idx
+
 
 def _build_edge_mask(pixel_ids):
     from scipy.ndimage import sobel
@@ -165,6 +178,7 @@ def _build_edge_mask(pixel_ids):
     threshold = magnitude.mean() + magnitude.std() * 0.5
     return magnitude > threshold
 
+
 def _build_slic_edge_mask(segment_map):
     h, w = segment_map.shape
     mask = np.zeros((h, w), dtype=bool)
@@ -174,6 +188,7 @@ def _build_slic_edge_mask(segment_map):
     mask[1:, :] |= (segment_map[:-1, :] != segment_map[1:, :])
     return mask
 
+
 def _compute_gradient_magnitude(img_arr):
     from scipy.ndimage import sobel
     gray = (0.299 * img_arr[:, :, 0] + 0.587 * img_arr[:, :, 1] + 0.114 * img_arr[:, :, 2])
@@ -181,6 +196,7 @@ def _compute_gradient_magnitude(img_arr):
     sy = sobel(gray, axis=0)
     mag = np.hypot(sx, sy)
     return (mag / (mag.max() + 1e-8)).astype(np.float32)
+
 
 def quantize_nearest(small_img, palette_df, segment_map=None):
     img_arr = np.array(small_img.convert("RGB")).astype(float)
@@ -190,6 +206,7 @@ def quantize_nearest(small_img, palette_df, segment_map=None):
     lab_grid = rgb2lab(img_arr / 255.0).reshape(-1, 3)
     ids_flat, _ = _nearest_ids_for_pixels(lab_grid, palette_lab, palette_color_ids)
     return ids_flat.reshape(h, w).astype(np.int32)
+
 
 def quantize_nearest_potts_fast(small_img, palette_df, segment_map=None,
                                  smoothness=POTTS_SMOOTHNESS, n_iter=POTTS_ITER):
@@ -235,6 +252,7 @@ def quantize_nearest_potts_fast(small_img, palette_df, segment_map=None,
                 idx = diffs.argmin()
                 out_ids[y, x] = palette_color_ids[idx]
                 error = (old_pixel - palette_rgb[idx]) * POTTS_LOCAL_DITHER_STRENGTH
+
                 def _add(ny, nx, w_coef, _work=work, _sz=smooth_zone, _e=error):
                     if 0 <= ny < h and 0 <= nx < w and _sz[ny, nx]:
                         _work[ny, nx] += _e * w_coef
@@ -244,6 +262,7 @@ def quantize_nearest_potts_fast(small_img, palette_df, segment_map=None,
                 _add(y + 1, x + 1, 1 / 16)
         return out_ids
     return ids_map
+
 
 def _segment_colors_lab_median(img_arr, segment_map):
     lab_full = rgb2lab(img_arr / 255.0)
@@ -257,6 +276,7 @@ def _segment_colors_lab_median(img_arr, segment_map):
         seg_area[i] = mask.sum()
     return seg_ids, seg_lab, seg_area
 
+
 def _assign_segments_to_palette_hungarian(seg_lab, seg_area, palette_lab, palette_color_ids):
     n_seg = len(seg_lab)
     n_colors = len(palette_lab)
@@ -269,6 +289,7 @@ def _assign_segments_to_palette_hungarian(seg_lab, seg_area, palette_lab, palett
     else:
         best_idx = weighted_cost.argmin(axis=1)
     return palette_color_ids[best_idx]
+
 
 def _build_coarse_segment_map(img_arr, studs_per_segment_side=3.0, compactness=10, sigma=1.0):
     """SLIC прямо на пикселизованном изображении (уже в размере
@@ -286,12 +307,12 @@ def _build_coarse_segment_map(img_arr, studs_per_segment_side=3.0, compactness=1
                      sigma=sigma, start_label=0)
     return segments
 
+
 def quantize_by_segment_assign(small_img, palette_df, segment_map=None,
                                 dither_seams=True, seam_strength=0.5,
                                 studs_per_segment_side=3.0):
-    """segment_map, если передан извне, игнорируется для
-    бостроения сегментов - вместо этого строится собственная,
-    более грубая сегментация."""
+    """segment_map, если передан извне, игнорируется для построения
+    сегментов - вместо этого строится собственная, более грубая сегментация."""
     img_arr = np.array(small_img.convert("RGB")).astype(float)
     h, w, _ = img_arr.shape
     coarse_segment_map = _build_coarse_segment_map(
@@ -310,9 +331,9 @@ def quantize_by_segment_assign(small_img, palette_df, segment_map=None,
     color_to_rgb = {int(cid): palette_rgb[i] for i, cid in enumerate(palette_color_ids)}
     seam_mask = np.zeros((h, w), dtype=bool)
     seam_mask[:, :-1] |= (pixel_ids[:, :-1] != pixel_ids[:, 1:])
-    seam_mask[:, 1:]  |= (pixel_ids[:, :-1] != pixel_ids[:, 1:])
+    seam_mask[:, 1:] |= (pixel_ids[:, :-1] != pixel_ids[:, 1:])
     seam_mask[:-1, :] |= (pixel_ids[:-1, :] != pixel_ids[1:, :])
-    seam_mask[1:, :]  |= (pixel_ids[:-1, :] != pixel_ids[1:, :])
+    seam_mask[1:, :] |= (pixel_ids[:-1, :] != pixel_ids[1:, :])
     work = img_arr.copy()
     out_ids = pixel_ids.copy()
     ys, xs = np.where(seam_mask)
@@ -326,6 +347,7 @@ def quantize_by_segment_assign(small_img, palette_df, segment_map=None,
             if 0 <= ny < h and 0 <= nx < w and seam_mask[ny, nx]:
                 work[ny, nx] += error * coef
     return out_ids.astype(np.int32)
+
 
 def quantize_by_cluster_map(small_img, palette_df, n_colors_requested, segment_map=None):
     img_arr = np.array(small_img.convert("RGB")).astype(float)
@@ -345,6 +367,7 @@ def quantize_by_cluster_map(small_img, palette_df, n_colors_requested, segment_m
         color_id, _ = _nearest_ids_for_pixels(mean_lab, palette_lab, palette_color_ids)
         out_ids[mask] = color_id[0]
     return out_ids.reshape(h, w)
+
 
 def quantize_by_superpixel_map(small_img, palette_df, n_colors_requested, segment_map=None,
                                 n_segments_multiplier=4.0, compactness=12, sigma=1.0):
@@ -369,6 +392,7 @@ def quantize_by_superpixel_map(small_img, palette_df, n_colors_requested, segmen
         out_ids[mask] = color_id[0]
     return out_ids
 
+
 def dither_bayer(small_img, palette_df, matrix_key="bayer4", segment_map=None):
     img_arr = np.array(small_img.convert("RGB")).astype(float)
     h, w, _ = img_arr.shape
@@ -382,6 +406,7 @@ def dither_bayer(small_img, palette_df, matrix_key="bayer4", segment_map=None):
     lab_grid = rgb2lab(perturbed / 255.0).reshape(-1, 3)
     ids_flat, _ = _nearest_ids_for_pixels(lab_grid, palette_lab, palette_color_ids)
     return ids_flat.reshape(h, w).astype(np.int32)
+
 
 def dither_atkinson(small_img, palette_df, segment_map=None):
     img_arr = np.array(small_img.convert("RGB")).astype(float)
@@ -401,6 +426,7 @@ def dither_atkinson(small_img, palette_df, segment_map=None):
             out_ids[y, x] = palette_color_ids[idx]
             error = (old_pixel - palette_rgb[idx]) / 8.0
             cur_seg = segment_map[y, x] if use_boundaries else None
+
             def _add(ny, nx):
                 if 0 <= ny < h and 0 <= nx < w:
                     if not use_boundaries or segment_map[ny, nx] == cur_seg:
@@ -412,6 +438,7 @@ def dither_atkinson(small_img, palette_df, segment_map=None):
             _add(y + 1, x + 1)
             _add(y + 2, x)
     return out_ids
+
 
 def dither_floyd_steinberg(small_img, palette_df, segment_map=None, strength=1.0):
     img_arr = np.array(small_img.convert("RGB")).astype(float)
@@ -448,8 +475,9 @@ def dither_floyd_steinberg(small_img, palette_df, segment_map=None, strength=1.0
                     work[y + 1, nx_diag_fwd] += error * 1 / 16
     return out_ids
 
+
 def dither_to_lego_palette(small_img, palette_df, segment_map=None, quantize_mode="nearest_potts",
-                           n_colors_requested=None):
+                            n_colors_requested=None):
     if quantize_mode == "superpixel":
         n = n_colors_requested if n_colors_requested is not None else len(palette_df)
         return quantize_by_superpixel_map(small_img, palette_df, n, segment_map=segment_map)
@@ -470,31 +498,63 @@ def dither_to_lego_palette(small_img, palette_df, segment_map=None, quantize_mod
         return dither_floyd_steinberg(small_img, palette_df, segment_map=segment_map, strength=0.6)
     return dither_floyd_steinberg(small_img, palette_df, segment_map=segment_map, strength=1.0)
 
+
 def majority_vote_cleanup_fast(pixel_ids, min_neighbor_fraction=0.5, iterations=1,
                                 enabled=True, slic_edge_mask=None, saliency_map=None):
+    """Убирает одиночные шумовые пиксели голосованием соседей 3x3.
+
+    Раньше высокая saliency (топ-20% по contrast/edges/center_boost) сплошняком
+    исключала из cleanup всю зону целиком, а не только её контуры. так как
+    compute_saliency_map даёт center_boost на весь центр кадра (там обычно лицо),
+    это оставляло дизеринг-шум нетронутым именно там, где он заметнее всего,
+    при этом фон/одежда чистились нормально — асимметрия, которую видно на
+    портретах как "шум на лице, чисто вокруг".
+
+    теперь saliency не исключает пиксели из cleanup жёстко, а только повышает
+    порог голосования (в важных зонах нужно более явное большинство соседей
+    перед заменой пикселя, но очистка не блокируется полностью). Настоящие
+    края объектов защищает только edge_mask (локальный градиент id-карты) и
+    slic_edge_mask (границы SLIC-сегментов) — они как и раньше не трогаются.
+    """
     if not enabled:
         return pixel_ids
     edge_mask = _build_edge_mask(pixel_ids)
     if slic_edge_mask is not None and slic_edge_mask.shape == pixel_ids.shape:
         edge_mask = edge_mask | slic_edge_mask
+
     if saliency_map is not None and saliency_map.shape == pixel_ids.shape:
-        sal_threshold = np.percentile(saliency_map, 80)
-        edge_mask = edge_mask | (saliency_map >= sal_threshold)
-    def _mode_excluding_center(values):
-        center = values[4]
-        neighbors = np.delete(values, 4)
-        vals, counts = np.unique(neighbors, return_counts=True)
-        majority_val = vals[counts.argmax()]
-        same_fraction = np.sum(neighbors == center) / len(neighbors)
-        if same_fraction < min_neighbor_fraction and counts.max() / len(neighbors) >= min_neighbor_fraction:
-            return majority_val
-        return center
+        sal_norm = saliency_map / (saliency_map.max() + 1e-8)
+        upper = 0.85
+        fraction_map = min_neighbor_fraction + sal_norm * (upper - min_neighbor_fraction)
+        fraction_map = np.clip(fraction_map, min_neighbor_fraction, upper).astype(np.float64)
+    else:
+        fraction_map = np.full(pixel_ids.shape, min_neighbor_fraction, dtype=np.float64)
+
     result = pixel_ids.copy()
     for _ in range(max(1, iterations)):
-        cleaned = ndimage.generic_filter(result, _mode_excluding_center, size=3, mode="nearest").astype(np.int32)
+        h, w = result.shape
+        idx_map = np.arange(h * w).reshape(h, w).astype(np.float64)
+        flat_ids = result.flatten()
+        flat_thresh = fraction_map.flatten()
+
+        def _mode_excluding_center(idx_flat):
+            idx_flat = idx_flat.astype(np.int64)
+            values = flat_ids[idx_flat]
+            center = values[4]
+            neighbors = np.delete(values, 4)
+            vals, counts = np.unique(neighbors, return_counts=True)
+            majority_val = vals[counts.argmax()]
+            same_fraction = np.sum(neighbors == center) / len(neighbors)
+            local_thresh = flat_thresh[idx_flat[4]]
+            if same_fraction < local_thresh and counts.max() / len(neighbors) >= local_thresh:
+                return majority_val
+            return center
+
+        cleaned = ndimage.generic_filter(idx_map, _mode_excluding_center, size=3, mode="nearest").astype(np.int32)
         cleaned[edge_mask] = result[edge_mask]
         result = cleaned
     return result
+
 
 @st.cache_data(show_spinner=False)
 def compute_pixel_ids_full(_img_bytes, full_span_box, full_mosaic_w, full_mosaic_h,
