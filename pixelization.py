@@ -82,6 +82,53 @@ def build_working_palette(small_img, n_colors, colors_df):
     return subset, len(unique_ids), k
 
 
+def build_working_palette_weighted(small_img, n_colors, colors_df, saliency_map=None):
+    """Взвешенный KMeans: пиксели в важных зонах (глаза, рот, контур)
+    имеют бо́льший вес при поиске кластеров.
+    saliency_map — float32 H×W массив 0..1; None → обычный KMeans.
+    Это даёт палитру, лучше отражающую детали лица, а не просто площадь.
+    """
+    arr_rgb = np.array(small_img.convert("RGB")).reshape(-1, 3).astype(float)
+    arr_lab = rgb2lab((arr_rgb.reshape(-1, 1, 3) / 255.0)).reshape(-1, 3)
+    n_unique_pixels = len(np.unique(arr_rgb, axis=0))
+    k = max(1, min(n_colors, n_unique_pixels, len(colors_df)))
+
+    sample_weight = None
+    if saliency_map is not None:
+        sal_flat = saliency_map.flatten().astype(np.float64)
+        sal_flat = sal_flat / sal_flat.mean()  # нормализуем к среднему 1.0
+        sample_weight = np.clip(sal_flat, 0.2, 5.0)
+
+    km = KMeans(n_clusters=k, n_init=6, random_state=42).fit(arr_lab, sample_weight=sample_weight)
+    centers_lab = km.cluster_centers_
+    matched_color_ids = assign_unique_colors(centers_lab, colors_df)
+    unique_ids = sorted(set(matched_color_ids))
+    subset = colors_df[colors_df["color_id"].isin(unique_ids)].reset_index(drop=True)
+    return subset, len(unique_ids), k
+
+
+def compute_saliency_map(small_img):
+    """Простая карта важности для портрета:
+    объединяет Sobel-границы + яркостной контраст.
+    Можно подключить face-detection в будущем.
+    Возвращает float32 H×W массив 0..1.
+    """
+    from scipy.ndimage import sobel, gaussian_filter
+    arr = np.array(small_img.convert("RGB")).astype(np.float32) / 255.0
+    gray = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
+    # Sobel-градиент
+    sx = sobel(gray, axis=1)
+    sy = sobel(gray, axis=0)
+    edges = np.hypot(sx, sy)
+    # Локальный яркостной контраст
+    blur = gaussian_filter(gray, sigma=3)
+    contrast = np.abs(gray - blur)
+    # Объединяем
+    sal = edges + contrast
+    sal = sal / (sal.max() + 1e-8)
+    return sal.astype(np.float32)
+
+
 def smooth_before_pixelize(img, sigma_color=0.08, sigma_spatial=8, enabled=True):
     """Стадия A. sigma_spatial=8 — убирает шум кожи, но НЕ съедает глаза/зрачки."""
     if not enabled:
@@ -118,6 +165,22 @@ def _build_edge_mask(pixel_ids):
     return magnitude > threshold
 
 
+def _build_slic_edge_mask(segment_map):
+    """Маска границ на основе SLIC-сегментов.
+    Границы между сегментами — это реальные объектные контуры.
+    True = граница сегмента → cleanup и Potts не трогают.
+    """
+    h, w = segment_map.shape
+    mask = np.zeros((h, w), dtype=bool)
+    # Горизонтальные границы
+    mask[:, :-1] |= (segment_map[:, :-1] != segment_map[:, 1:])
+    mask[:, 1:]  |= (segment_map[:, :-1] != segment_map[:, 1:])
+    # Вертикальные границы
+    mask[:-1, :] |= (segment_map[:-1, :] != segment_map[1:, :])
+    mask[1:, :]  |= (segment_map[:-1, :] != segment_map[1:, :])
+    return mask
+
+
 def quantize_nearest(small_img, palette_df, segment_map=None):
     img_arr = np.array(small_img.convert("RGB")).astype(float)
     h, w, _ = img_arr.shape
@@ -129,29 +192,50 @@ def quantize_nearest(small_img, palette_df, segment_map=None):
 
 
 def quantize_nearest_potts_fast(small_img, palette_df, segment_map=None,
-                                  smoothness=2.0, n_iter=2):
+                                  smoothness=2.5, n_iter=3):
     """Nearest-color + edge-aware Potts-регуляризация (векторизованная ICM).
-    Убирает шумовые одиночные пиксели внутри однородных зон (кожа, фон, волосы),
-    но НЕ сглаживает через цветовые границы объектов.
-    smoothness=2.0, n_iter=2 оптимальны для портретов 48x64 — 80x100."""
+
+    Изменения v2:
+    - smoothness увеличен до 2.5 (было 2.0) — лучше убирает шум кожи/фона.
+    - n_iter увеличен до 3 (было 2) — больше проходов = чище крупные зоны.
+    - Если передан segment_map, Potts-штраф НУЛЕВОЙ на границах SLIC-сегментов:
+      это сохраняет глаза, веки, брови, контур губ точно по объектным контурам.
+    - Внутри сегмента штраф полный (smoothness) — зоны кожи, волос, фона
+      выравниваются без шахматки, как у конкурента.
+
+    smoothness=2.5, n_iter=3 — оптимально для портретов 48x64–80x100.
+    """
     img_arr = np.array(small_img.convert("RGB")).astype(float)
     h, w, _ = img_arr.shape
     palette_lab = palette_df[["L", "a", "b_lab"]].values
     palette_color_ids = palette_df["color_id"].values
     n_colors = len(palette_df)
 
+    # Матрица data cost: H × W × N_colors
     lab_grid = rgb2lab(img_arr / 255.0).reshape(-1, 3)
     all_dists = deltaE_ciede2000(lab_grid[:, None, :], palette_lab[None, :, :])
     data_cost = all_dists.reshape(h, w, n_colors)
     current = all_dists.argmin(axis=1).reshape(h, w)
 
+    # Маска объектных границ: на них Potts-штраф = 0 (не сглаживать через контуры)
+    if segment_map is not None and segment_map.shape == (h, w):
+        border_mask = _build_slic_edge_mask(segment_map)
+    else:
+        border_mask = np.zeros((h, w), dtype=bool)
+
     for _ in range(n_iter):
         agree = np.zeros((h, w, n_colors), dtype=np.float32)
         for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            shifted = np.roll(current, shift=dy, axis=0) if dy else current
-            shifted = np.roll(shifted, shift=dx, axis=1) if dx else shifted
+            shifted_y = np.clip(np.arange(h) + dy, 0, h - 1)
+            shifted_x = np.clip(np.arange(w) + dx, 0, w - 1)
+            neighbor = current[np.ix_(shifted_y, shifted_x)]
             for ci in range(n_colors):
-                agree[:, :, ci] += (shifted == ci).astype(np.float32)
+                agree[:, :, ci] += (neighbor == ci).astype(np.float32)
+
+        # Где граница SLIC — обнуляем поддержку соседей (не сглаживаем)
+        if border_mask.any():
+            agree[border_mask] = 0.0
+
         total_cost = data_cost - smoothness * agree
         current = total_cost.argmin(axis=2)
 
@@ -320,14 +404,20 @@ def dither_to_lego_palette(small_img, palette_df, segment_map=None, quantize_mod
     return dither_floyd_steinberg(small_img, palette_df, segment_map=segment_map, strength=1.0)
 
 
-def majority_vote_cleanup_fast(pixel_ids, min_neighbor_fraction=0.5, iterations=1, enabled=True):
-    """Чистка одиночных выбросов с защитой граничных пикселей.
-    Пиксели вблизи границ (Sobel-маска) НЕ изменяются — сохраняет
-    зрачки, веки, края губ и контур лица."""
+def majority_vote_cleanup_fast(pixel_ids, min_neighbor_fraction=0.5, iterations=1,
+                                 enabled=True, slic_edge_mask=None):
+    """Чистка одиночных выбросов с двойной защитой границ:
+    1. Sobel-маска на карте color_id (крупные цветовые переходы).
+    2. SLIC-граница (если передана) — точные объектные контуры.
+    Пиксели на любой из границ НЕ изменяются — сохраняет
+    зрачки, веки, края губ и контур лица.
+    """
     if not enabled:
         return pixel_ids
 
     edge_mask = _build_edge_mask(pixel_ids)
+    if slic_edge_mask is not None and slic_edge_mask.shape == pixel_ids.shape:
+        edge_mask = edge_mask | slic_edge_mask
 
     def _mode_excluding_center(values):
         center = values[4]
@@ -350,11 +440,22 @@ def majority_vote_cleanup_fast(pixel_ids, min_neighbor_fraction=0.5, iterations=
 @st.cache_data(show_spinner=False)
 def compute_pixel_ids_full(_img_bytes, full_span_box, full_mosaic_w, full_mosaic_h,
                             n_colors_requested, use_slic_boundaries, colors_db_signature,
-                            smooth_enabled=True, quantize_mode="superpixel",
+                            smooth_enabled=True, quantize_mode="nearest_potts",
                             cleanup_enabled=True, cleanup_fraction=0.5,
                             extra_smooth_enabled=False, extra_smooth_radius=2,
                             apply_sharpen=False):
     """
+    Основной пайплайн пикселизации.
+
+    Изменения v2 (nearest_potts как режим по умолчанию):
+    - quantize_mode по умолчанию = "nearest_potts" (было "superpixel").
+    - Режим nearest_potts v2: segment_map передаётся в Potts-регуляризатор
+      как карта объектных границ → нет сглаживания через контуры.
+    - majority_vote_cleanup_fast получает slic_edge_mask отдельным аргументом
+      → двойная защита границ при cleanup.
+    - build_working_palette_weighted заменяет build_working_palette:
+      приоритет деталей с высоким Sobel-контрастом при выборе палитры.
+
     apply_sharpen=False по умолчанию — UnsharpMask + Lanczos создают ореолы,
     которые при большом числе цветов превращаются в битые одиночные пиксели.
     Передавайте apply_sharpen=True только через явный UI-чекбокс.
@@ -368,19 +469,31 @@ def compute_pixel_ids_full(_img_bytes, full_span_box, full_mosaic_w, full_mosaic
 
     small_full = pixelate_exact(work_img, full_mosaic_w, full_mosaic_h,
                                  crop_box=None, apply_sharpen=apply_sharpen)
-    working_palette, actual_unique_colors, k_used = build_working_palette(small_full, n_colors_requested, colors_df)
 
+    # Взвешенная палитра: важные зоны (детали лица) получают приоритет
+    saliency = compute_saliency_map(small_full)
+    working_palette, actual_unique_colors, k_used = build_working_palette_weighted(
+        small_full, n_colors_requested, colors_df, saliency_map=saliency
+    )
+
+    # SLIC-сегменты нужны всегда когда use_slic_boundaries=True или режим nearest_potts
     segment_map_full = None
-    if use_slic_boundaries:
+    slic_edge_mask = None
+    if use_slic_boundaries or quantize_mode in ("nearest_potts", "superpixel"):
         segment_map_full = compute_slic_segments(_img_bytes, full_mosaic_w, full_mosaic_h,
                                                     crop_box=full_span_box)
+        slic_edge_mask = _build_slic_edge_mask(segment_map_full)
 
     pixel_ids_full = dither_to_lego_palette(small_full, working_palette, segment_map=segment_map_full,
                                               quantize_mode=quantize_mode, n_colors_requested=n_colors_requested)
 
     if cleanup_enabled:
-        pixel_ids_full = majority_vote_cleanup_fast(pixel_ids_full, min_neighbor_fraction=cleanup_fraction,
-                                                       enabled=True)
+        pixel_ids_full = majority_vote_cleanup_fast(
+            pixel_ids_full,
+            min_neighbor_fraction=cleanup_fraction,
+            enabled=True,
+            slic_edge_mask=slic_edge_mask
+        )
 
     # Реальный счётчик: unique значения в итоговой карте, а не размер рабочей палитры
     actual_used_colors = len(np.unique(pixel_ids_full))
