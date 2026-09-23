@@ -10,6 +10,8 @@ pip install -r requirements.txt
 streamlit run app.py
 """
 import io
+import zipfile
+from instructions_export import build_all_instructions_svg
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -500,7 +502,23 @@ if uploaded_file:
                               frame_depth_choice, matting_depth_choice, preview_mode=preview_mode_key)
         st.download_button("🎨 Скачать SVG для Illustrator", data=svg_buf, file_name="lego_mosaic.svg",
                             mime="image/svg+xml")
-														
+
+        # --- инструкции по панелям (новое) ---
+        instr_combined_svg, instr_per_panel = build_all_instructions_svg(pixel_ids, working_palette, preview_mode=preview_mode_key)
+
+        st.download_button("📋 Инструкция — все панели (один SVG)",
+                            data=instr_combined_svg, file_name="lego_instructions_all.svg",
+                            mime="image/svg+xml")
+
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for panel_index, svg_bytes in instr_per_panel:
+                zf.writestr(f"panel_{panel_index:02d}.svg", svg_bytes)
+        zip_buf.seek(0)
+        st.download_button("📋 Инструкции по панелям (ZIP)",
+                            data=zip_buf, file_name="lego_instructions.zip",
+                            mime="application/zip")
+                            
 
 else:
     st.info("Загрузите фото клиента, чтобы начать расчёт.")
