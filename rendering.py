@@ -13,6 +13,14 @@ from config import (
 )
 from canvas_math import compute_adaptive_cell_px
 
+def fit_preview_to_max_height(preview_img, max_height_px=760):
+    w, h = preview_img.size
+    if h <= max_height_px:
+        return preview_img, 1.0
+    scale = max_height_px / h
+    new_w = max(1, round(w * scale))
+    resized = preview_img.resize((new_w, max_height_px), Image.Resampling.LANCZOS)
+    return resized, scale
 
 def render_crop_visualization(orig_img, crop_box, max_preview_w=COMPARE_PREVIEW_MAX_WIDTH_PX):
     img = orig_img.convert("RGBA")

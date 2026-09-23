@@ -161,6 +161,7 @@ div[data-testid="stCheckbox"] { padding-top: 0.05rem; padding-bottom: 0.05rem; }
 div[data-testid="stImage"] { margin-bottom: 0.3rem; }
 div[data-testid="stHorizontalBlock"] { gap: 0.6rem; align-items: flex-start; }
 label[data-testid="stWidgetLabel"] { margin-bottom: 0.1rem; padding-bottom: 0; }
+div[data-testid="stImage"] img { max-height: 70vh; width: auto; height: auto; object-fit: contain; display: block; margin-left: auto; margin-right: auto; }
 </style>
 """
 

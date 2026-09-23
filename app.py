@@ -40,7 +40,7 @@ from pixelization import compute_pixel_ids_full
 from frame_layout import build_multi_ring_layout, compute_multi_ring_cost, overlay_frame_tile_layout
 from rendering import (
     render_crop_visualization, render_final_preview, overlay_canvas_grid_and_center,
-    click_to_stud_coords, apply_manual_color_overrides,
+    click_to_stud_coords, apply_manual_color_overrides, fit_preview_to_max_height,
 )
 from pricing import (
     build_usage_report, compute_cost_summary, compute_selling_price, color_swatch_html,
@@ -211,7 +211,7 @@ if uploaded_file:
         max_possible_colors = min(len(colors_df), mosaic_target_w * mosaic_target_h)
         n_colors_requested = slider_with_buttons(f"Цветов в палитре (max {len(colors_df)})", key="n_colors_val",
                                                    min_val=1, max_val=max_possible_colors,
-                                                   default_val=min(30, max_possible_colors))
+                                                   default_val=min(16, max_possible_colors))
     with col_p2:
         use_slic_boundaries = st.checkbox("Границы объектов (SLIC)", value=True)
         show_canvas_grid = st.checkbox("Сетка панелей 16×16", value=True)
@@ -223,7 +223,7 @@ if uploaded_file:
     st.caption("Три независимые стадии: сглаживание фото → способ квантизации цвета → чистка одиночных выбросов.")
     col_q1, col_q2, col_q3 = st.columns(3)
     with col_q1:
-        smooth_enabled = st.checkbox("Сгладить фото перед пикселизацией (bilateral)", value=True,
+        smooth_enabled = st.checkbox("Сгладить фото перед пикселизацией (bilateral)", value=False,
                                       help="Убирает шум/зерно фото внутри однородных зон, сохраняя контуры объектов. "
                                            "Уменьшает число случайных ярких/тёмных студин ещё до квантизации.")
     with col_q2:
@@ -250,7 +250,7 @@ if uploaded_file:
         if extra_smooth_enabled:
             extra_smooth_radius = st.slider("Радиус сглаживания", min_value=1, max_value=6, value=2, step=1)
     with col_q3:
-        cleanup_enabled = st.checkbox("Убрать одиночные пиксели (majority-vote)", value=True,
+        cleanup_enabled = st.checkbox("Убрать одиночные пиксели (majority-vote)", value=False,
                                        help="Финальная 'ручная подчистка': студина, резко отличающаяся от 8 соседей, "
                                             "заменяется цветом большинства соседей.")
         cleanup_fraction = 0.5
@@ -331,6 +331,8 @@ if uploaded_file:
                                                  show_frame=show_frame_layout, show_matting=show_matting_layout,
                                                  show_labels=show_tile_labels)
 
+    preview_img, preview_scale = fit_preview_to_max_height(preview_img, max_height_px=760)
+
     usage_report = build_usage_report(pixel_ids, working_palette)
     cost_summary = compute_cost_summary(usage_report)
 
@@ -369,19 +371,19 @@ if uploaded_file:
     col_prev, col_stats = st.columns(2)
     with col_prev:
         pixel_edit_mode = st.checkbox(
-            "✏️ Режим редактирования цвета (клик по деталям)", value=True,
+            "✏️ Режим редактирования цвета (клик по деталям)", value=False,
             help="Выключите, чтобы превью стало обычной картинкой — тогда доступно "
                  "'Открыть изображение в новой вкладке' по правому клику браузера.",
         )
         total_inset_for_click = frame_depth_choice + matting_depth_choice
         if PIXEL_EDITOR_AVAILABLE and pixel_edit_mode:
-            click_result = streamlit_image_coordinates(preview_img, key="pixel_editor_click", use_column_width=True)
+            click_result = streamlit_image_coordinates(preview_img, key="pixel_editor_click")
             st.caption("Клик по детали мозаики, чтобы изменить её цвет вручную.")
             if click_result is not None:
                 displayed_w = click_result.get("width", preview_img.width) or preview_img.width
                 scale_factor = preview_img.width / displayed_w
-                real_click_x = click_result["x"] * scale_factor
-                real_click_y = click_result["y"] * scale_factor
+                real_click_x = click_result["x"] * scale_factor / preview_scale
+                real_click_y = click_result["y"] * scale_factor / preview_scale
                 clicked_stud = click_to_stud_coords(real_click_x, real_click_y, used_cell_px,
                                                      total_inset_for_click, mosaic_target_w, mosaic_target_h)
                 if clicked_stud is not None:
