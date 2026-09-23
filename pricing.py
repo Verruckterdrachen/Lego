@@ -65,6 +65,58 @@ def build_usage_table_html(usage_report):
         '</tr></thead><tbody>' + "".join(rows_html) + '</tbody></table>'
     )
 
+def export_svg(pixel_ids, palette_df, canvas_w, canvas_h, frame_depth, matting_depth,
+                preview_mode="round", stud_size=10, group_by_color=True):
+    total_inset = frame_depth + matting_depth
+    svg_w = canvas_w * stud_size
+    svg_h = canvas_h * stud_size
+
+    palette_by_id = {
+        int(row["color_id"]): row["rgb_hex"]
+        for _, row in palette_df.iterrows()
+    }
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{svg_w}" height="{svg_h}" '
+        f'viewBox="0 0 {svg_w} {svg_h}">',
+        f'<rect x="0" y="0" width="{svg_w}" height="{svg_h}" fill="#000000"/>',
+    ]
+
+    if matting_depth > 0:
+        mx = frame_depth * stud_size
+        mw = svg_w - 2 * mx
+        mh = svg_h - 2 * mx
+        parts.append(f'<rect x="{mx}" y="{mx}" width="{mw}" height="{mh}" fill="#FFFFFF"/>')
+
+    h, w = pixel_ids.shape
+    groups = {}
+    for row in range(h):
+        for col in range(w):
+            color_id = int(pixel_ids[row, col])
+            hex_color = palette_by_id.get(color_id, "808080")
+            cx = (total_inset + col) * stud_size + stud_size / 2
+            cy = (total_inset + row) * stud_size + stud_size / 2
+            if preview_mode == "round":
+                r = stud_size * 0.42
+                el = f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{r:.2f}" fill="#{hex_color}"/>'
+            else:
+                x = (total_inset + col) * stud_size
+                y = (total_inset + row) * stud_size
+                el = f'<rect x="{x:.2f}" y="{y:.2f}" width="{stud_size}" height="{stud_size}" fill="#{hex_color}"/>'
+            groups.setdefault(color_id, []).append(el)
+
+    if group_by_color:
+        for color_id, elements in sorted(groups.items()):
+            parts.append(f'<g id="color_{color_id}" data-color-id="{color_id}">')
+            parts.extend(elements)
+            parts.append('</g>')
+    else:
+        for elements in groups.values():
+            parts.extend(elements)
+
+    parts.append('</svg>')
+    svg_content = "\n".join(parts)
+    return svg_content.encode("utf-8")
 
 def export_pdf(pixel_ids, colors_df, usage_report, canvas_w, canvas_h, frame_depth, matting_depth):
     buf = io.BytesIO()

@@ -44,7 +44,7 @@ from rendering import (
 )
 from pricing import (
     build_usage_report, compute_cost_summary, compute_selling_price, color_swatch_html,
-    build_usage_table_html, export_pdf,
+    build_usage_table_html, export_pdf, export_svg,
 )
 from ui_widgets import metric_card, slider_with_buttons, select_slider_with_buttons
 
@@ -495,6 +495,12 @@ if uploaded_file:
                               frame_depth_choice, matting_depth_choice)
         st.download_button("📄 Скачать схему сборки PDF", data=pdf_buf, file_name="lego_assembly_scheme.pdf",
                             mime="application/pdf")
+
+        svg_buf = export_svg(pixel_ids, working_palette, canvas_w, canvas_h,
+                              frame_depth_choice, matting_depth_choice, preview_mode=preview_mode_key)
+        st.download_button("🎨 Скачать SVG для Illustrator", data=svg_buf, file_name="lego_mosaic.svg",
+                            mime="image/svg+xml")
+														
 
 else:
     st.info("Загрузите фото клиента, чтобы начать расчёт.")
